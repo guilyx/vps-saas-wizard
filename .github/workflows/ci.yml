@@ -32,17 +32,21 @@ jobs:
           # Actually boot Traefik against the generated config: it must parse the
           # static file, load every dynamic router/middleware and reach the ACME
           # stage. Missing middlewares or bad YAML surface as errors here.
-          mkdir -p "$S/logs"
+          mkdir -p "$S/logs" "$S/acme"
           # Values in the config file win over CLI flags, so patch a copy to
-          # expose the read-only API and bind it inside the container.
+          # expose the read-only API and bind it inside the container. The ACME
+          # CA is pointed at a dead address: the resolver must still register
+          # (that is what we are checking) without contacting Let's Encrypt.
           sed -e 's/^  dashboard: false/  dashboard: true/' \
               -e 's/^  insecure: false/  insecure: true/' \
               -e 's/^    address: "127.0.0.1:8082"/    address: ":8082"/' \
+              -e 's#^      tlsChallenge: {}#      caServer: "https://127.0.0.1:9/directory"\n      tlsChallenge: {}#' \
               "$S/proxy/traefik.yml" > "$S/traefik-check.yml"
           docker run --rm --name traefik-check -d -p 127.0.0.1:8082:8082 \
             -v "$S/traefik-check.yml:/etc/traefik/traefik.yml:ro" \
             -v "$S/proxy/dynamic:/etc/traefik/dynamic:ro" \
             -v "$S/logs:/var/log/traefik" \
+            -v "$S/acme:/acme" \
             traefik:v3.1 --configFile=/etc/traefik/traefik.yml
           sleep 10
           curl -fsS http://127.0.0.1:8082/api/http/routers > "$S/routers.json"
@@ -50,6 +54,11 @@ jobs:
           docker logs traefik-check > "$S/traefik.log" 2>&1 || true
           docker rm -f traefik-check >/dev/null 2>&1 || true
           cat "$S/traefik.log"
+          # A router can report "enabled" while its TLS is broken, so check the
+          # certificate resolver wired up too.
+          if grep -qiE 'nonexistent certificate resolver|ACME resolve is skipped' "$S/traefik.log"; then
+            echo "::error::Traefik did not register the letsencrypt certificate resolver"; exit 1
+          fi
           python3 - "$S/routers.json" "$S/middlewares.json" <<'PY'
           import json, sys
           objs = [o for f in sys.argv[1:3] for o in json.load(open(f))
