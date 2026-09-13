@@ -21,7 +21,7 @@ step_app_config() {
 
 step_app_enabled() { cfg_bool APP_ENABLE; }
 
-app_dir() { printf '%s/%s' "$WIZARD_APPS_DIR" "${1:-$APP_NAME}"; }
+app_dir() { printf '%s/%s' "$WIZARD_APPS_DIR" "$1"; }
 
 # Keys whose empty value should be auto-generated and typed hidden.
 is_secret_key() { [[ "${1^^}" =~ (SECRET|PASSWORD|PASSWD|TOKEN|API_KEY|PRIVATE_KEY|_KEY$|^KEY$|SALT|JWT|AUTH_SECRET|ENCRYPTION) ]]; }
@@ -122,7 +122,7 @@ app_check_dns() {
 }
 
 step_app_plan() {
-  local dir; dir=$(app_dir)
+  local dir; dir=$(app_dir "$APP_NAME")
   if [[ -z "$APP_SOURCE" ]]; then ui_bullet "Scaffold demo app (traefik/whoami) in $dir/src"
   else ui_bullet "Clone/sync $APP_SOURCE${APP_BRANCH:+ ($APP_BRANCH)} into $dir/src"; fi
   ui_bullet "Build .env from .env.example (secrets auto-generated: $APP_ENV_AUTOGEN_SECRETS) at $dir/.env (mode 600)"
@@ -170,7 +170,7 @@ app_sync_source() {
   fi
   local git_env=()
   if [[ "$APP_SOURCE" =~ ^(git@|ssh://) ]] && cfg_bool APP_GIT_SSH_KEY_GENERATE; then
-    local keyfile; keyfile="$(app_dir)/deploy_key"
+    local keyfile; keyfile="$(app_dir "$APP_NAME")/deploy_key"
     if [[ ! -f "$keyfile" && "$DRY_RUN" != true ]]; then
       ssh-keygen -q -t ed25519 -N '' -C "vps-wizard deploy key for $APP_NAME" -f "$keyfile"
       ui_blank
@@ -246,7 +246,7 @@ app_write_meta() {
 }
 
 step_app_apply() {
-  local dir src; dir=$(app_dir); src="$dir/src"
+  local dir src; dir=$(app_dir "$APP_NAME"); src="$dir/src"
   [[ "$DRY_RUN" == true ]] || mkdir -p "$dir"
   app_sync_source "$src"
 

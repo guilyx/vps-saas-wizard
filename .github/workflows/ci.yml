@@ -13,7 +13,7 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get update -q && sudo apt-get install -y -q shellcheck
       - name: shellcheck
-        run: shellcheck -x -S warning bin/vps-wizard install.sh lib/*.sh steps/*.sh templates/backup.sh templates/app-deploy.sh tests/run.sh
+        run: shellcheck -x -S warning bin/vps-wizard install.sh lib/*.sh steps/*.sh templates/backup.sh templates/app-deploy.sh tests/*.sh
       - name: Unit + dry-run tests
         run: bash tests/run.sh
       - name: Validate generated Caddyfile
@@ -33,18 +33,18 @@ jobs:
           # static file, load every dynamic router/middleware and reach the ACME
           # stage. Missing middlewares or bad YAML surface as errors here.
           mkdir -p "$S/logs"
-          # api.insecure in the config file wins over the CLI flag, so patch a copy.
+          # Values in the config file win over CLI flags, so patch a copy to
+          # expose the read-only API and bind it inside the container.
           sed -e 's/^  dashboard: false/  dashboard: true/' \
               -e 's/^  insecure: false/  insecure: true/' \
+              -e 's/^    address: "127.0.0.1:8082"/    address: ":8082"/' \
               "$S/proxy/traefik.yml" > "$S/traefik-check.yml"
           docker run --rm --name traefik-check -d -p 127.0.0.1:8082:8082 \
             -v "$S/traefik-check.yml:/etc/traefik/traefik.yml:ro" \
             -v "$S/proxy/dynamic:/etc/traefik/dynamic:ro" \
             -v "$S/logs:/var/log/traefik" \
-            traefik:v3.1 \
-            --configFile=/etc/traefik/traefik.yml \
-            --entryPoints.traefik.address=:8082
-          sleep 8
+            traefik:v3.1 --configFile=/etc/traefik/traefik.yml
+          sleep 10
           curl -fsS http://127.0.0.1:8082/api/http/routers > "$S/routers.json"
           curl -fsS http://127.0.0.1:8082/api/http/middlewares > "$S/middlewares.json"
           docker logs traefik-check > "$S/traefik.log" 2>&1 || true
