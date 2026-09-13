@@ -1,0 +1,41 @@
+# Managed by vps-wizard - edge reverse proxy (Traefik v3)
+# Per-app routers live in ./dynamic/*.yml (file provider, hot-reloaded).
+services:
+  traefik:
+    image: traefik:v3.1
+    container_name: proxy-traefik
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./dynamic:/etc/traefik/dynamic:ro
+      - traefik_acme:/acme
+      - {{PROXY_LOG_DIR}}:/var/log/traefik
+    networks:
+      - proxy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  traefik_acme:
+
+networks:
+  proxy:
+    external: true

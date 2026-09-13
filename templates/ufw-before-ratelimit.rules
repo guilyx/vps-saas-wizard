@@ -1,0 +1,16 @@
+# BEGIN VPS-WIZARD RATELIMIT
+# Per-source connection limits for the public HTTP(S) ports. These live in the
+# INPUT path *and* the FORWARD path (Docker-published ports) so they protect
+# the reverse proxy container as well. Legit browsers open < 20 connections.
+#   connlimit: cap concurrent connections per /32
+#   hashlimit: cap NEW connections per second per /32 (burst allowed)
+-A ufw-before-input -p tcp -m multiport --dports 80,443 -m connlimit --connlimit-above {{HTTP_CONNLIMIT}} --connlimit-mask 32 -j DROP
+-A ufw-before-input -p tcp -m multiport --dports 80,443 --syn -m hashlimit --hashlimit-name http_syn --hashlimit-mode srcip --hashlimit-above {{HTTP_NEWCONN_RATE}}/second --hashlimit-burst {{HTTP_NEWCONN_BURST}} --hashlimit-htable-expire 30000 -j DROP
+-A ufw-before-forward -p tcp -m multiport --dports 80,443 -m connlimit --connlimit-above {{HTTP_CONNLIMIT}} --connlimit-mask 32 -j DROP
+-A ufw-before-forward -p tcp -m multiport --dports 80,443 --syn -m hashlimit --hashlimit-name http_syn_fwd --hashlimit-mode srcip --hashlimit-above {{HTTP_NEWCONN_RATE}}/second --hashlimit-burst {{HTTP_NEWCONN_BURST}} --hashlimit-htable-expire 30000 -j DROP
+# Drop obviously bogus TCP flag combinations (port scans / floods)
+-A ufw-before-input -p tcp --tcp-flags ALL NONE -j DROP
+-A ufw-before-input -p tcp --tcp-flags ALL ALL -j DROP
+-A ufw-before-input -p tcp --tcp-flags SYN,FIN SYN,FIN -j DROP
+-A ufw-before-input -p tcp --tcp-flags SYN,RST SYN,RST -j DROP
+# END VPS-WIZARD RATELIMIT

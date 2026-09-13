@@ -1,0 +1,16 @@
+# Managed by vps-wizard - site for app "{{APP_NAME}}"
+{{SITE_HOSTS}} {
+	import app_defaults
+{{SITE_WWW_REDIRECT}}
+	reverse_proxy {{APP_UPSTREAM}} {
+		header_up X-Real-IP {remote_host}
+		health_uri {{APP_HEALTHCHECK_PATH}}
+		health_interval 30s
+		health_timeout 5s
+		lb_try_duration 15s
+		transport http {
+			dial_timeout 5s
+			response_header_timeout 60s
+		}
+	}
+}

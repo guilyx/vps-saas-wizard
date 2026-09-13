@@ -1,0 +1,592 @@
+#!/usr/bin/env bash
+# vps-wizard - production-grade SaaS deployment on a bare VPS.
+# https://github.com/guilyx/vps-saas-wizard
+# No `set -e`: failures of mutating commands are handled explicitly by run()
+# (which aborts) so that interactive prompts and probes never trip the wizard.
+set -uo pipefail
+
+WIZARD_HOME="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+export WIZARD_HOME
+
+# shellcheck source=../lib/core.sh
+. "$WIZARD_HOME/lib/core.sh"
+# shellcheck source=../lib/ui.sh
+. "$WIZARD_HOME/lib/ui.sh"
+# shellcheck source=../lib/validate.sh
+. "$WIZARD_HOME/lib/validate.sh"
+# shellcheck source=../lib/detect.sh
+. "$WIZARD_HOME/lib/detect.sh"
+
+# ---------------------------------------------------------------------------
+# Step registry
+# ---------------------------------------------------------------------------
+STEPS=()
+declare -A STEP_TITLE STEP_SUB
+register_step() { STEPS+=("$1"); STEP_TITLE[$1]="$2"; STEP_SUB[$1]="${3:-}"; }
+
+for _f in "$WIZARD_HOME"/steps/*.sh; do
+  # shellcheck disable=SC1090
+  . "$_f"
+done
+unset _f
+
+step_exists() { local s; for s in "${STEPS[@]}"; do [[ "$s" == "$1" ]] && return 0; done; return 1; }
+
+declare_all_config() { local s; for s in "${STEPS[@]}"; do "step_${s}_config"; done; }
+
+# ---------------------------------------------------------------------------
+# CLI parsing
+# ---------------------------------------------------------------------------
+usage() {
+  cat <<EOF
+${C_BOLD}vps-wizard${C_RESET} v$WIZARD_VERSION - deploy a SaaS on a bare VPS with best practices.
+
+${C_BOLD}USAGE${C_RESET}
+  vps-wizard [wizard]                 Interactive guided setup (default)
+  vps-wizard init [-o FILE]           Answer the questions, write a config, change nothing
+  vps-wizard plan [-c FILE]           Show what apply would do (dry run)
+  vps-wizard apply [-c FILE] [--yes]  Apply a config non-interactively
+  vps-wizard step NAME [-c FILE]      Run a single step (see list-steps)
+  vps-wizard status                   What is installed / configured
+  vps-wizard doctor                   Health checks: firewall, docker, tls, ssh, dns
+  vps-wizard confirm                  Confirm SSH access; cancel the rollback safety net
+  vps-wizard report                   Print the last deployment report
+  vps-wizard list-steps               Step names in execution order
+  vps-wizard config [KEY]             Show effective config (or one key)
+
+${C_BOLD}APPS${C_RESET}
+  vps-wizard app list
+  vps-wizard app add --name N --domain D [--source URL] [--branch B] [--service S] [--port P] [--env K=V,...]
+  vps-wizard app deploy N [--no-pull]  Pull + build + roll (zero-touch redeploy)
+  vps-wizard app logs N [SERVICE]      Tail logs
+  vps-wizard app ps|restart|stop|start|down N
+  vps-wizard app exec N SERVICE CMD... Run a command inside a service
+  vps-wizard app remove N [--purge]    Remove site + stack (--purge deletes files/volumes)
+
+${C_BOLD}ENV${C_RESET}
+  vps-wizard env N list|get KEY|set KEY=VALUE...|unset KEY|edit|path
+
+${C_BOLD}OPTIONS${C_RESET}
+  -c, --config FILE     Config file (default: $WIZARD_CONFIG)
+  -o, --out FILE        Where 'init' writes the config
+  -y, --yes             Don't ask for confirmation
+  -n, --dry-run         Print commands instead of executing them
+      --only a,b        Only run these steps
+      --skip a,b        Skip these steps
+  -v, --verbose         Stream command output
+      --non-interactive Never prompt; use config/defaults (implied by apply)
+      --ascii           No unicode glyphs
+  -h, --help
+
+Config keys: run 'vps-wizard config' or see examples/wizard.conf.example.
+Logs: $WIZARD_LOG_DIR
+EOF
+}
+
+CMD=""
+CONFIG_FILE=""
+OUT_FILE=""
+ONLY=""
+SKIP=""
+ARGS=()
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -c|--config) CONFIG_FILE="$2"; shift 2 ;;
+      -o|--out) OUT_FILE="$2"; shift 2 ;;
+      -y|--yes) ASSUME_YES=true; shift ;;
+      -n|--dry-run) DRY_RUN=true; shift ;;
+      --only) ONLY="$2"; shift 2 ;;
+      --skip) SKIP="$2"; shift 2 ;;
+      -v|--verbose) VERBOSE=true; shift ;;
+      --non-interactive) NONINTERACTIVE=true; shift ;;
+      --ascii) WIZARD_ASCII=true; shift ;;
+      -h|--help) usage; exit 0 ;;
+      --version) echo "$WIZARD_VERSION"; exit 0 ;;
+      --) shift; ARGS+=("$@"); break ;;
+      -*) if [[ -n "$CMD" ]]; then ARGS+=("$1"); shift; else die "unknown option: $1 (see --help)"; fi ;;
+      *) if [[ -z "$CMD" ]]; then CMD="$1"; else ARGS+=("$1"); fi; shift ;;
+    esac
+  done
+  CMD=${CMD:-wizard}
+}
+
+in_list() { local needle="$1" x; while IFS= read -r x; do [[ "$x" == "$needle" ]] && return 0; done < <(split_list "$2"); return 1; }
+
+step_selected() {
+  local s="$1"
+  [[ -n "$ONLY" ]] && ! in_list "$s" "$ONLY" && return 1
+  [[ -n "$SKIP" ]] && in_list "$s" "$SKIP" && return 1
+  return 0
+}
+
+load_config_or_defaults() {
+  declare_all_config
+  local f="${CONFIG_FILE:-$WIZARD_CONFIG}"
+  if [[ -f "$f" ]]; then
+    config_load "$f"
+    debug "using config $f"
+    return 0
+  fi
+  [[ -n "$CONFIG_FILE" ]] && die "config file not found: $CONFIG_FILE"
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Plan / apply / summary
+# ---------------------------------------------------------------------------
+show_plan() {
+  ui_section "Plan"
+  local s n=0
+  for s in "${STEPS[@]}"; do
+    step_selected "$s" || continue
+    n=$((n+1))
+    if "step_${s}_enabled"; then
+      printf '  %s%s%s %s%s%s\n' "$C_ACCENT" "$G_ARROW" "$C_RESET" "$C_BOLD" "${STEP_TITLE[$s]}" "$C_RESET"
+      "step_${s}_plan" || true
+    else
+      printf '  %s%s %s (skipped)%s\n' "$C_DIM" "$G_BULLET" "${STEP_TITLE[$s]}" "$C_RESET"
+    fi
+  done
+  ui_blank
+}
+
+apply_steps() {
+  local -a selected=()
+  local s
+  for s in "${STEPS[@]}"; do step_selected "$s" && "step_${s}_enabled" && selected+=("$s"); done
+  local total=${#selected[@]} i=0
+  local started=$SECONDS
+  for s in "${selected[@]}"; do
+    i=$((i+1))
+    ui_step_header "$i" "$total" "${STEP_TITLE[$s]}" "${STEP_SUB[$s]}"
+    local t0=$SECONDS
+    "step_${s}_apply"
+    log "step $s done in $((SECONDS - t0))s"
+    ui_progress "$i" "$total" "${C_GRAY}${STEP_TITLE[$s]} done in $((SECONDS - t0))s${C_RESET}"
+  done
+  log "all steps done in $((SECONDS - started))s"
+}
+
+write_report() {
+  local pub="${HOST_PUBLIC_IP:-<public-ip>}" tsip; tsip=$(state_get tailscale.ip)
+  local ssh_port="$SSH_PORT"
+  {
+    echo "# vps-wizard deployment report"
+    echo
+    echo "Generated: $(date -Is)  ·  host: $(hostname)  ·  wizard v$WIZARD_VERSION"
+    echo
+    echo "## Access"
+    if [[ "$(state_get ssh.restricted_to_tailscale)" == true ]]; then
+      echo "- SSH (Tailscale only): \`ssh -p $ssh_port $DEPLOY_USER@${tsip:-<tailscale-ip>}\`"
+    else
+      echo "- SSH: \`ssh -p $ssh_port $DEPLOY_USER@$pub\`"
+      [[ -n "$tsip" ]] && echo "- SSH via Tailscale: \`ssh $DEPLOY_USER@$tsip\`"
+    fi
+    echo "- Root login: $(cfg_bool SSH_DISABLE_ROOT_LOGIN && echo disabled || echo allowed) · Password auth: $(cfg_bool SSH_DISABLE_PASSWORD_AUTH && echo disabled || echo enabled)"
+    echo "- Sudo: $DEPLOY_USER has passwordless sudo (/etc/sudoers.d/90-$DEPLOY_USER)"
+    (( ACCESS_ROLLBACK_MINUTES > 0 )) && echo "- **Run \`vps-wizard confirm\` after verifying a fresh SSH login**, or the SSH changes revert in ${ACCESS_ROLLBACK_MINUTES} min."
+    echo
+    echo "## Network & protection"
+    echo "- Firewall: ufw deny-incoming; open: ${ssh_port}/tcp$( [[ "$PROXY_TYPE" != none ]] && echo ", 80,443/tcp, 443/udp$(cfg_bool FIREWALL_CLOUDFLARE_ONLY && echo ' (Cloudflare ranges only)')")${FIREWALL_EXTRA_TCP_PORTS:+, tcp $FIREWALL_EXTRA_TCP_PORTS}${FIREWALL_EXTRA_UDP_PORTS:+, udp $FIREWALL_EXTRA_UDP_PORTS}"
+    echo "- Docker ports obey ufw (DOCKER-USER chain). Publish app ports only via the proxy."
+    cfg_bool HARDEN_CONN_LIMITS && echo "- Per-IP limits on 80/443: $HARDEN_HTTP_CONNLIMIT concurrent, $HARDEN_HTTP_NEWCONN_RATE new/s (burst $HARDEN_HTTP_NEWCONN_BURST)"
+    cfg_bool HARDEN_SYSCTL && echo "- sysctl: SYN cookies, rp_filter, no redirects, BBR (/etc/sysctl.d/99-vps-wizard.conf)"
+    cfg_bool FAIL2BAN_ENABLE && echo "- fail2ban: sshd + recidive$(cfg_bool FAIL2BAN_HTTP_JAIL && echo ' + vps-http-flood'), ban $FAIL2BAN_BANTIME escalating. Unban: \`fail2ban-client unban <ip>\`"
+    cfg_bool TAILSCALE_ENABLE && echo "- Tailscale: ${tsip:-see 'tailscale status'}$(cfg_bool TAILSCALE_SSH && echo ' · Tailscale SSH on')"
+    echo
+    echo "## Platform"
+    echo "- Docker: $(docker --version 2>/dev/null | sed 's/Docker version //' || echo 'n/a'), compose $(docker compose version --short 2>/dev/null || echo 'n/a')"
+    [[ "$PROXY_TYPE" != none ]] && echo "- Proxy: $PROXY_TYPE in $WIZARD_PROXY_DIR (sites: $( [[ $PROXY_TYPE == caddy ]] && echo sites/ || echo dynamic/ ), logs: logs/access.log)"
+    echo "- Apps: $WIZARD_APPS_DIR/<name>/{src,.env,compose.wizard.yml,app.conf,deploy.sh}"
+    cfg_bool BACKUP_ENABLE && echo "- Backups: daily $BACKUP_TIME → $BACKUP_DIR (keep ${BACKUP_RETENTION_DAYS}d)${BACKUP_RESTIC_REPOSITORY:+, offsite restic $BACKUP_RESTIC_REPOSITORY}. Run now: \`vps-backup\`"
+    if cfg_bool OPS_ENABLE; then
+      local oip; oip=$(state_get ops.bind_ip)
+      cfg_bool OPS_DOZZLE && echo "- Dozzle: http://${oip:-127.0.0.1}:$OPS_DOZZLE_PORT"
+      cfg_bool OPS_UPTIME_KUMA && echo "- Uptime Kuma: http://${oip:-127.0.0.1}:$OPS_UPTIME_KUMA_PORT"
+    fi
+    echo
+    echo "## Apps"
+    local d
+    for d in "$WIZARD_APPS_DIR"/*/; do
+      [[ -f "$d/app.conf" ]] || continue
+      local n dom; n=$(basename "$d"); dom=$(awk -F= '/^APP_DOMAIN=/{print $2}' "$d/app.conf" | tr -d "'\"")
+      echo "- **$n**${dom:+ → https://$dom} · redeploy: \`vps-wizard app deploy $n\` · logs: \`vps-wizard app logs $n\` · env: \`vps-wizard env $n edit\`"
+    done
+    echo
+    echo "## Next steps"
+    echo "1. Open a NEW terminal and verify SSH works, then run \`vps-wizard confirm\`."
+    [[ "$PROXY_TYPE" != none && -n "${APP_DOMAIN:-}" ]] && echo "2. Visit https://$APP_DOMAIN - the certificate is issued on first request (DNS must point here)."
+    echo "3. Point a CI job at \`vps-wizard app deploy <name>\` over SSH for zero-touch deploys (see examples/github-deploy.yml)."
+    echo "4. Re-run \`vps-wizard doctor\` any time; config lives in $WIZARD_CONFIG."
+  } > "${1:-/dev/stdout}"
+}
+
+show_summary() {
+  ui_blank
+  local pub="${HOST_PUBLIC_IP:-<public-ip>}" tsip; tsip=$(state_get tailscale.ip)
+  local lines=()
+  lines+=("$(printf '%sSSH%s        ssh -p %s %s@%s' "$C_GRAY" "$C_RESET" "$SSH_PORT" "$DEPLOY_USER" "$([[ "$(state_get ssh.restricted_to_tailscale)" == true ]] && echo "${tsip:-<tailscale-ip>}" || echo "$pub")")")
+  [[ "$PROXY_TYPE" != none && -n "${APP_DOMAIN:-}" ]] && lines+=("$(printf '%sApp%s        https://%s' "$C_GRAY" "$C_RESET" "$APP_DOMAIN")")
+  [[ -n "$tsip" ]] && lines+=("$(printf '%sTailscale%s  %s' "$C_GRAY" "$C_RESET" "$tsip")")
+  lines+=("$(printf '%sReport%s     %s' "$C_GRAY" "$C_RESET" "$WIZARD_REPORT")")
+  lines+=("$(printf '%sConfig%s     %s' "$C_GRAY" "$C_RESET" "$WIZARD_CONFIG")")
+  lines+=("$(printf '%sLog%s        %s' "$C_GRAY" "$C_RESET" "$WIZARD_LOG_FILE")")
+  ui_box "$G_OK Deployment complete" "${lines[@]}"
+  if (( ACCESS_ROLLBACK_MINUTES > 0 )) && [[ "$DRY_RUN" != true ]] && safety_pending; then
+    ui_blank
+    ui_warn "${C_BOLD}Verify access now:${C_RESET} open a NEW terminal, run the SSH command above, then here:"
+    printf '      %svps-wizard confirm%s\n' "$C_BOLD" "$C_RESET"
+    ui_note "Otherwise SSH hardening reverts automatically in ${ACCESS_ROLLBACK_MINUTES} minutes (you will not be locked out)."
+    if [[ "$NONINTERACTIVE" != true ]]; then
+      ui_blank
+      if ask_yn "Did the new SSH login work? (answer only after testing)" false; then safety_confirm; fi
+    fi
+  fi
+  ui_blank
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+cmd_wizard() {
+  require_root wizard
+  ui_banner "$WIZARD_VERSION"
+  load_config_or_defaults && ui_info "Loaded existing answers from $WIZARD_CONFIG (press Enter to keep them)."
+  HOST_PUBLIC_IP=$(public_ip)
+  local total=${#STEPS[@]} i=0 s
+  for s in "${STEPS[@]}"; do
+    i=$((i+1))
+    step_selected "$s" || continue
+    ui_step_header "$i" "$total" "${STEP_TITLE[$s]}" "${STEP_SUB[$s]}"
+    "step_${s}_prompt"
+  done
+  ui_blank; ui_hr
+  validate_config || die "Fix the configuration errors above."
+  show_plan
+  config_save "$WIZARD_CONFIG"
+  ui_info "Answers saved to $WIZARD_CONFIG (re-run non-interactively with: vps-wizard apply --yes)"
+  ui_confirm_or_exit "Apply this plan now?"
+  apply_steps
+  write_report "$WIZARD_REPORT"
+  show_summary
+}
+
+cmd_init() {
+  ui_banner "$WIZARD_VERSION"
+  load_config_or_defaults || true
+  HOST_PUBLIC_IP=$(public_ip)
+  local total=${#STEPS[@]} i=0 s
+  for s in "${STEPS[@]}"; do
+    i=$((i+1)); step_selected "$s" || continue
+    [[ "$s" == preflight ]] && { ui_box "Host" "$(detect_summary_lines)"; continue; }
+    ui_step_header "$i" "$total" "${STEP_TITLE[$s]}" "${STEP_SUB[$s]}"
+    "step_${s}_prompt"
+  done
+  validate_config || die "Fix the configuration errors above."
+  local out="${OUT_FILE:-./vps-wizard.conf}"
+  DRY_RUN=false config_save "$out"
+  ui_ok "Config written to $out. Apply with: sudo vps-wizard apply -c $out --yes"
+}
+
+cmd_plan() {
+  DRY_RUN=true
+  NONINTERACTIVE=true
+  load_config_or_defaults || ui_warn "No config found; planning with defaults."
+  HOST_PUBLIC_IP=$(public_ip)
+  ui_banner "$WIZARD_VERSION"
+  ui_box "Host" "$(detect_summary_lines)"
+  validate_config || die "Configuration is invalid."
+  show_plan
+  ui_section "Commands that would run"
+  apply_steps
+}
+
+cmd_apply() {
+  require_root apply
+  NONINTERACTIVE=true
+  load_config_or_defaults || die "No config. Run 'vps-wizard init' or pass --config FILE."
+  HOST_PUBLIC_IP=$(public_ip)
+  ui_banner "$WIZARD_VERSION"
+  ui_box "Host" "$(detect_summary_lines)"
+  step_preflight_prompt
+  validate_config || die "Configuration is invalid."
+  show_plan
+  ui_confirm_or_exit "Apply?"
+  [[ -n "$CONFIG_FILE" && "$CONFIG_FILE" != "$WIZARD_CONFIG" ]] && config_save "$WIZARD_CONFIG"
+  apply_steps
+  write_report "$WIZARD_REPORT"
+  show_summary
+}
+
+cmd_step() {
+  local s="${ARGS[0]:-}"
+  [[ -n "$s" ]] || die "usage: vps-wizard step NAME"
+  step_exists "$s" || die "unknown step '$s' (see list-steps)"
+  [[ "$DRY_RUN" == true ]] || require_root step
+  load_config_or_defaults || ui_warn "No saved config; using defaults + environment."
+  HOST_PUBLIC_IP=$(public_ip)
+  if [[ "$NONINTERACTIVE" != true && "$ASSUME_YES" != true ]]; then
+    ui_step_header 1 1 "${STEP_TITLE[$s]}" "${STEP_SUB[$s]}"
+    "step_${s}_prompt"
+    validate_config || die "Configuration is invalid."
+    config_save "$WIZARD_CONFIG"
+  fi
+  ONLY="$s"
+  show_plan
+  ui_confirm_or_exit "Run step '$s'?"
+  apply_steps
+  [[ "$s" == access || "$s" == tailscale ]] && show_summary
+  return 0
+}
+
+cmd_status() {
+  load_config_or_defaults || true
+  HOST_PUBLIC_IP=$(public_ip)
+  ui_banner "$WIZARD_VERSION"
+  local s
+  for s in "${STEPS[@]}"; do
+    printf '  %s%s%s %s%s%s %s%s%s\n' "$C_ACCENT" "$G_BULLET" "$C_RESET" "$C_BOLD" "${STEP_TITLE[$s]}" "$C_RESET" "$C_GRAY" "$(step_is_done "$s" && echo "done $(state_get "step.$s")" || echo 'not run')" "$C_RESET"
+    "step_${s}_status" 2>/dev/null || true
+  done
+  ui_blank
+}
+
+cmd_doctor() {
+  load_config_or_defaults || true
+  HOST_PUBLIC_IP=$(public_ip)
+  ui_banner "$WIZARD_VERSION"
+  ui_section "Doctor"
+  local fails=0 warns=0
+  pass() { ui_ok "$*"; }
+  fail() { ui_error "$*"; fails=$((fails+1)); }
+  warn() { ui_warn "$*"; warns=$((warns+1)); }
+
+  if have ufw && ufw status 2>/dev/null | grep -q 'Status: active'; then pass "ufw active"; else fail "ufw inactive"; fi
+  if grep -q 'VPS-WIZARD DOCKER' /etc/ufw/after.rules 2>/dev/null; then pass "docker respects ufw (DOCKER-USER hook)"; else warn "DOCKER-USER hook missing: published container ports bypass ufw"; fi
+  local pa; pa=$(sshd -T 2>/dev/null | awk '$1=="passwordauthentication"{print $2}')
+  [[ "$pa" == no ]] && pass "ssh password auth disabled" || warn "ssh password auth: ${pa:-unknown}"
+  local rl; rl=$(sshd -T 2>/dev/null | awk '$1=="permitrootlogin"{print $2}')
+  [[ "$rl" == no ]] && pass "root ssh login disabled" || warn "root ssh login: ${rl:-unknown}"
+  safety_pending && warn "SSH rollback timer pending - run 'vps-wizard confirm' after testing a fresh login"
+  [[ -f "$WIZARD_STATE/ssh.rolled_back" ]] && fail "SSH hardening was ROLLED BACK (no confirmation). Re-run: vps-wizard step access"
+  if service_active fail2ban; then pass "fail2ban running ($(fail2ban-client status 2>/dev/null | awk -F: '/Jail list/{print $2}' | xargs))"; else warn "fail2ban not running"; fi
+  [[ "$(sysctl -n net.ipv4.tcp_syncookies 2>/dev/null)" == 1 ]] && pass "SYN cookies on" || warn "SYN cookies off"
+  if have docker; then
+    service_active docker && pass "docker running" || fail "docker not running"
+    docker network inspect proxy >/dev/null 2>&1 && pass "proxy network exists" || warn "proxy network missing"
+    local exposed
+    exposed=$(docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null | grep -E '0\.0\.0\.0:|:::' | grep -vE '^proxy-' || true)
+    if [[ -n "$exposed" ]]; then warn "containers publishing ports on all interfaces (should be proxy only):"; printf '%s\n' "$exposed" | sed 's/^/        /'; else pass "only the proxy publishes public ports"; fi
+    local unhealthy; unhealthy=$(docker ps --filter health=unhealthy --format '{{.Names}}' 2>/dev/null | xargs)
+    [[ -n "$unhealthy" ]] && fail "unhealthy containers: $unhealthy"
+    local restarting; restarting=$(docker ps --filter status=restarting --format '{{.Names}}' 2>/dev/null | xargs)
+    [[ -n "$restarting" ]] && fail "restart-looping containers: $restarting"
+  else
+    warn "docker not installed"
+  fi
+  local t; t=$(state_get proxy.type); t=${t:-$PROXY_TYPE}
+  if [[ "$t" != none ]]; then
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^proxy-$t$" && pass "$t proxy running" || fail "$t proxy container not running"
+    for p in 80 443; do
+      if ss -ltn 2>/dev/null | grep -qE ":$p\b"; then pass "port $p listening"; else fail "nothing listens on $p"; fi
+    done
+  fi
+  local d
+  for d in "$WIZARD_APPS_DIR"/*/; do
+    [[ -f "$d/app.conf" ]] || continue
+    local n dom hp; n=$(basename "$d")
+    dom=$(awk -F= '/^APP_DOMAIN=/{print $2}' "$d/app.conf" | tr -d "'\"")
+    hp=$(awk -F= '/^HEALTHCHECK_PATH=/{print $2}' "$d/app.conf" | tr -d "'\""); hp=${hp:-/}
+    [[ -n "$dom" ]] || continue
+    local resolved; resolved=$(getent ahostsv4 "$dom" 2>/dev/null | awk '{print $1; exit}')
+    if [[ -z "$resolved" ]]; then fail "$n: $dom does not resolve"
+    elif [[ -n "$HOST_PUBLIC_IP" && "$resolved" != "$HOST_PUBLIC_IP" ]] && ! proxy_behind_cf; then warn "$n: $dom → $resolved but this host is $HOST_PUBLIC_IP"
+    else pass "$n: DNS ok ($resolved)"; fi
+    if have curl; then
+      local code; code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://$dom$hp" 2>/dev/null || echo 000)
+      [[ "$code" =~ ^(2|3)[0-9][0-9]$ ]] && pass "$n: https://$dom$hp → $code" || fail "$n: https://$dom$hp → $code"
+      local exp; exp=$(echo | timeout 10 openssl s_client -servername "$dom" -connect "$dom:443" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
+      [[ -n "$exp" ]] && pass "$n: certificate valid until $exp"
+    fi
+  done
+  local perm
+  for d in "$WIZARD_APPS_DIR"/*/.env; do
+    [[ -f "$d" ]] || continue
+    perm=$(stat -c %a "$d"); [[ "$perm" == 600 ]] && pass "$(basename "$(dirname "$d")")/.env is 600" || warn "$d has mode $perm (expected 600)"
+  done
+  systemctl is-enabled vps-backup.timer >/dev/null 2>&1 && pass "backup timer enabled" || warn "backup timer not enabled"
+  local df_pct; df_pct=$(df --output=pcent / | tail -1 | tr -dc '0-9')
+  (( df_pct < 85 )) && pass "disk usage ${df_pct}%" || warn "disk usage ${df_pct}% - run 'docker system prune' or grow the disk"
+  if have needrestart; then :; fi
+  [[ -f /var/run/reboot-required ]] && warn "reboot required (kernel update)"
+  ui_blank
+  if (( fails == 0 )); then ui_ok "${C_BOLD}Doctor: healthy${C_RESET} ($warns warning(s))"; else ui_error "Doctor: $fails problem(s), $warns warning(s)"; fi
+  (( fails == 0 ))
+}
+
+cmd_confirm() { require_root confirm; load_config_or_defaults || true; safety_confirm; }
+
+cmd_report() { [[ -f "$WIZARD_REPORT" ]] && cat "$WIZARD_REPORT" || die "no report yet ($WIZARD_REPORT)"; }
+
+cmd_list_steps() { printf '%s\n' "${STEPS[@]}"; }
+
+cmd_config() {
+  load_config_or_defaults || true
+  if [[ -n "${ARGS[0]:-}" ]]; then
+    local k="${ARGS[0]}"
+    printf '%s\n' "${!k-}"
+  else
+    config_dump
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# app / env subcommands
+# ---------------------------------------------------------------------------
+app_load() {
+  local name="$1" dir; dir=$(app_dir "$name")
+  [[ -f "$dir/app.conf" ]] || die "unknown app '$name' (see: vps-wizard app list)"
+  # shellcheck disable=SC1091
+  . "$dir/app.conf"
+  APP_COMPOSE=(docker compose --project-name "$COMPOSE_PROJECT" --env-file "$dir/.env" -f "$SRC_DIR/$COMPOSE_FILE" -f "$dir/compose.wizard.yml")
+}
+
+cmd_app() {
+  local sub="${ARGS[0]:-list}" name="${ARGS[1]:-}"
+  load_config_or_defaults || true
+  case "$sub" in
+    list)
+      local d
+      for d in "$WIZARD_APPS_DIR"/*/; do
+        [[ -f "$d/app.conf" ]] || continue
+        # shellcheck disable=SC1091
+        ( . "$d/app.conf"; printf '%-20s %-35s %s\n' "$APP_NAME" "${APP_DOMAIN:+https://$APP_DOMAIN}" "$(docker compose --project-name "$COMPOSE_PROJECT" ps --format '{{.Service}}={{.State}}' 2>/dev/null | xargs)" )
+      done ;;
+    add)
+      require_root "app add"
+      HOST_PUBLIC_IP=$(public_ip)
+      # Reset app-specific config so we don't inherit the first app's values.
+      APP_ENABLE=true APP_NAME="" APP_SOURCE="" APP_BRANCH=main APP_COMPOSE_FILE="" APP_SERVICE="" APP_PORT="" APP_DOMAIN="" APP_WWW_REDIRECT=false APP_HEALTHCHECK_PATH=/ APP_ENV_FILE="" APP_ENV_VARS=""
+      local -a shift_args=("${ARGS[@]:1}")
+      local i=0
+      while (( i < ${#shift_args[@]} )); do
+        case "${shift_args[i]}" in
+          --name) APP_NAME="${shift_args[i+1]}"; i=$((i+2)) ;;
+          --source) APP_SOURCE="${shift_args[i+1]}"; i=$((i+2)) ;;
+          --branch) APP_BRANCH="${shift_args[i+1]}"; i=$((i+2)) ;;
+          --compose-file) APP_COMPOSE_FILE="${shift_args[i+1]}"; i=$((i+2)) ;;
+          --service) APP_SERVICE="${shift_args[i+1]}"; i=$((i+2)) ;;
+          --port) APP_PORT="${shift_args[i+1]}"; i=$((i+2)) ;;
+          --domain) APP_DOMAIN="${shift_args[i+1]}"; i=$((i+2)) ;;
+          --www) APP_WWW_REDIRECT=true; i=$((i+1)) ;;
+          --health) APP_HEALTHCHECK_PATH="${shift_args[i+1]}"; i=$((i+2)) ;;
+          --env-file) APP_ENV_FILE="${shift_args[i+1]}"; i=$((i+2)) ;;
+          --env) APP_ENV_VARS="${shift_args[i+1]}"; i=$((i+2)) ;;
+          *) die "app add: unknown option ${shift_args[i]}" ;;
+        esac
+      done
+      if [[ "$NONINTERACTIVE" == true || "$ASSUME_YES" == true ]]; then
+        [[ -n "$APP_NAME" ]] || die "--name is required"
+        [[ "$PROXY_TYPE" == none || -n "$APP_DOMAIN" ]] || die "--domain is required"
+        NONINTERACTIVE=true
+      else
+        [[ -z "$APP_NAME" ]] && APP_NAME=myapp
+        step_app_prompt
+      fi
+      valid_slug "$APP_NAME" || die "invalid app name"
+      [[ "$PROXY_TYPE" == none ]] || valid_domain "$APP_DOMAIN" || die "invalid domain '$APP_DOMAIN'"
+      ONLY=app; show_plan; ui_confirm_or_exit "Deploy $APP_NAME?"
+      step_app_apply
+      write_report "$WIZARD_REPORT" ;;
+    deploy)
+      [[ -n "$name" ]] || die "usage: vps-wizard app deploy NAME [--no-pull]"
+      app_load "$name"
+      exec bash "$(app_dir "$name")/deploy.sh" "${ARGS[@]:2}" ;;
+    logs)
+      [[ -n "$name" ]] || die "usage: vps-wizard app logs NAME [SERVICE]"
+      app_load "$name"; exec "${APP_COMPOSE[@]}" logs -f --tail=200 "${ARGS[@]:2}" ;;
+    ps|restart|stop|start|pull|down|config)
+      [[ -n "$name" ]] || die "usage: vps-wizard app $sub NAME"
+      app_load "$name"; exec "${APP_COMPOSE[@]}" "$sub" "${ARGS[@]:2}" ;;
+    exec)
+      [[ -n "$name" && -n "${ARGS[2]:-}" ]] || die "usage: vps-wizard app exec NAME SERVICE CMD..."
+      app_load "$name"; exec "${APP_COMPOSE[@]}" exec "${ARGS[@]:2}" ;;
+    remove)
+      require_root "app remove"
+      [[ -n "$name" ]] || die "usage: vps-wizard app remove NAME [--purge]"
+      app_load "$name"
+      local purge=false; [[ "${ARGS[2]:-}" == --purge ]] && purge=true
+      ui_confirm_or_exit "Remove app $name$( [[ $purge == true ]] && echo ' INCLUDING files and volumes')?"
+      proxy_remove_site "$name"; proxy_reload || true
+      if [[ "$purge" == true ]]; then run "${APP_COMPOSE[@]}" down --volumes --remove-orphans; run rm -rf "$(app_dir "$name")"
+      else run "${APP_COMPOSE[@]}" down --remove-orphans; fi
+      ui_ok "removed $name" ;;
+    *) die "unknown app subcommand '$sub' (see --help)" ;;
+  esac
+}
+
+cmd_env() {
+  local name="${ARGS[0]:-}" sub="${ARGS[1]:-list}"
+  [[ -n "$name" ]] || die "usage: vps-wizard env NAME list|get KEY|set KEY=VALUE...|unset KEY|edit|path"
+  load_config_or_defaults || true
+  local dir file; dir=$(app_dir "$name"); file="$dir/.env"
+  [[ -f "$dir/app.conf" ]] || die "unknown app '$name'"
+  case "$sub" in
+    path) echo "$file" ;;
+    list)
+      parse_env_file "$file" | while IFS="$ENV_SEP" read -r k v _; do
+        if is_sensitive_key "$k"; then printf '%s=%s\n' "$k" "$( [[ -n "$v" ]] && echo '********' )"; else printf '%s=%s\n' "$k" "$v"; fi
+      done ;;
+    get) [[ -n "${ARGS[2]:-}" ]] || die "usage: env NAME get KEY"; env_lookup "$file" "${ARGS[2]}" ;;
+    set)
+      require_root env
+      local kv k v changed=0
+      for kv in "${ARGS[@]:2}"; do
+        [[ "$kv" == *=* ]] || die "expected KEY=VALUE, got '$kv'"
+        k=${kv%%=*}; v=${kv#*=}
+        [[ "$k" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "invalid key '$k'"
+        if grep -qE "^(export )?$k=" "$file" 2>/dev/null; then
+          awk -v k="$k" -v line="$k=$(env_quote "$v")" 'BEGIN{done=0} $0 ~ "^(export )?"k"=" && !done {print line; done=1; next} {print}' "$file" >"$file.tmp"
+        else
+          { cat "$file" 2>/dev/null; printf '%s=%s\n' "$k" "$(env_quote "$v")"; } >"$file.tmp"
+        fi
+        chmod 600 "$file.tmp"; mv -f "$file.tmp" "$file"; changed=$((changed+1))
+      done
+      ui_ok "$changed variable(s) set. Apply with: vps-wizard app deploy $name --no-pull" ;;
+    unset)
+      require_root env
+      [[ -n "${ARGS[2]:-}" ]] || die "usage: env NAME unset KEY"
+      grep -vE "^(export )?${ARGS[2]}=" "$file" >"$file.tmp" || true; chmod 600 "$file.tmp"; mv -f "$file.tmp" "$file"
+      ui_ok "${ARGS[2]} removed" ;;
+    edit) require_root env; "${EDITOR:-${VISUAL:-nano}}" "$file"; chmod 600 "$file"; ui_info "Apply with: vps-wizard app deploy $name --no-pull" ;;
+    *) die "unknown env subcommand '$sub'" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+main() {
+  parse_args "$@"
+  log_init
+  detect_host
+  case "$CMD" in
+    wizard) cmd_wizard ;;
+    init) cmd_init ;;
+    plan) cmd_plan ;;
+    apply) cmd_apply ;;
+    step) cmd_step ;;
+    status) cmd_status ;;
+    doctor) cmd_doctor ;;
+    confirm) cmd_confirm ;;
+    report) cmd_report ;;
+    list-steps) cmd_list_steps ;;
+    config) cmd_config ;;
+    app) cmd_app ;;
+    env) cmd_env ;;
+    help) usage ;;
+    *) die "unknown command '$CMD' (see --help)" ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,23 @@
+# Managed by vps-wizard - Traefik router for app "{{APP_NAME}}"
+http:
+  routers:
+    {{APP_NAME}}:
+      rule: "{{TRAEFIK_RULE}}"
+      entryPoints: [websecure]
+      service: {{APP_NAME}}
+      middlewares:
+        - body-limit@file
+{{TRAEFIK_WWW_MIDDLEWARE_REF}}
+      tls:
+        certResolver: letsencrypt
+{{TRAEFIK_WWW_MIDDLEWARE}}
+  services:
+    {{APP_NAME}}:
+      loadBalancer:
+        passHostHeader: true
+        servers:
+          - url: "http://{{APP_UPSTREAM}}"
+        healthCheck:
+          path: "{{APP_HEALTHCHECK_PATH}}"
+          interval: 30s
+          timeout: 5s
