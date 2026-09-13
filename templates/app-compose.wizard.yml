@@ -1,0 +1,21 @@
+# Managed by vps-wizard - overlay for app "{{APP_NAME}}".
+# Layered on top of the app's own compose file. It attaches the web service to
+# the shared "proxy" network so the edge proxy can reach it, and applies safe
+# production defaults. Edit freely; re-run `vps-wizard app deploy {{APP_NAME}}`.
+services:
+  {{APP_SERVICE}}:
+    restart: unless-stopped
+    networks:
+      - default
+      - proxy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  proxy:
+    external: true

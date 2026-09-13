@@ -1,0 +1,101 @@
+# vps-wizard configuration - copy, edit, then:
+#   sudo vps-wizard plan  -c wizard.conf        # dry run, prints every command
+#   sudo vps-wizard apply -c wizard.conf --yes  # non-interactive apply
+# Every key is optional; unset keys use the defaults shown here.
+# Print the full effective config with descriptions: vps-wizard config
+
+## System ------------------------------------------------------------------
+SYS_UPGRADE=true
+SYS_HOSTNAME=                 # empty = keep
+SYS_TIMEZONE=UTC
+SYS_SWAP_GB=auto              # auto | 0 | <GB>
+SYS_UNATTENDED_UPGRADES=true
+SYS_AUTO_REBOOT=false
+
+## Deploy user & SSH ---------------------------------------------------------
+DEPLOY_USER=deploy
+# 'root' copies /root/.ssh/authorized_keys; or paste a key; or a file path.
+DEPLOY_USER_SSH_KEY=root
+SSH_PORT=22
+SSH_DISABLE_PASSWORD_AUTH=true
+SSH_DISABLE_ROOT_LOGIN=true
+# Auto-revert SSH/firewall changes unless `vps-wizard confirm` runs in time.
+ACCESS_ROLLBACK_MINUTES=15
+
+## Firewall ------------------------------------------------------------------
+FIREWALL_ENABLE=true
+FIREWALL_SSH_RATE_LIMIT=true
+FIREWALL_EXTRA_TCP_PORTS=
+FIREWALL_EXTRA_UDP_PORTS=
+FIREWALL_CLOUDFLARE_ONLY=false   # true when DNS is proxied through Cloudflare
+FIREWALL_ALLOW_ICMP=true
+
+## Anti-DDoS / kernel --------------------------------------------------------
+HARDEN_SYSCTL=true
+HARDEN_CONN_LIMITS=true
+HARDEN_HTTP_CONNLIMIT=100        # concurrent conns per IP on 80/443
+HARDEN_HTTP_NEWCONN_RATE=30      # new conns/s per IP
+HARDEN_HTTP_NEWCONN_BURST=100
+
+## fail2ban ------------------------------------------------------------------
+FAIL2BAN_ENABLE=true
+FAIL2BAN_BANTIME=1h
+FAIL2BAN_FINDTIME=10m
+FAIL2BAN_MAXRETRY=5
+FAIL2BAN_HTTP_JAIL=true
+FAIL2BAN_HTTP_MAXRETRY=60
+FAIL2BAN_IGNOREIP=               # e.g. "203.0.113.5 198.51.100.0/24"
+
+## Docker --------------------------------------------------------------------
+DOCKER_INSTALL=true
+DOCKER_LOG_MAX_SIZE=10m
+DOCKER_LOG_MAX_FILE=3
+
+## Tailscale -----------------------------------------------------------------
+TAILSCALE_ENABLE=false
+TAILSCALE_AUTH_KEY=              # tskey-auth-... (required for non-interactive)
+TAILSCALE_HOSTNAME=
+TAILSCALE_SSH=true
+TAILSCALE_RESTRICT_SSH=false     # close public SSH; tailnet only (rollback armed)
+TAILSCALE_ADVERTISE_TAGS=        # e.g. tag:server
+
+## Reverse proxy -------------------------------------------------------------
+PROXY_TYPE=caddy                 # caddy | traefik | none
+PROXY_EMAIL=you@example.com      # Let's Encrypt notifications (required)
+PROXY_MAX_BODY=50MB
+PROXY_BEHIND_CLOUDFLARE=         # empty = same as FIREWALL_CLOUDFLARE_ONLY
+TRAEFIK_RATE_AVG=50
+TRAEFIK_RATE_BURST=100
+TRAEFIK_INFLIGHT=50
+
+## Application ---------------------------------------------------------------
+APP_ENABLE=true
+APP_NAME=myapp
+APP_SOURCE=                      # https://github.com/you/app.git | git@... | /local/path | empty = demo
+APP_BRANCH=main
+APP_COMPOSE_FILE=                # auto-detect
+APP_SERVICE=                     # auto-detect (web/app/frontend/api/... or first)
+APP_PORT=                        # auto-detect from ports:/expose:
+APP_DOMAIN=app.example.com       # required when PROXY_TYPE != none
+APP_WWW_REDIRECT=false
+APP_HEALTHCHECK_PATH=/
+APP_ENV_FILE=                    # existing .env to seed from
+APP_ENV_VARS=                    # KEY=VALUE,KEY=VALUE overrides
+APP_ENV_AUTOGEN_SECRETS=true
+APP_GIT_SSH_KEY_GENERATE=true
+
+## Backups -------------------------------------------------------------------
+BACKUP_ENABLE=true
+BACKUP_DIR=/var/backups/vps-wizard
+BACKUP_TIME=03:30
+BACKUP_RETENTION_DAYS=7
+BACKUP_RESTIC_REPOSITORY=        # s3:s3.amazonaws.com/bucket/path | b2:bucket:path | sftp:user@host:/path
+BACKUP_RESTIC_PASSWORD=          # generated if empty
+BACKUP_RESTIC_ENV=               # AWS_ACCESS_KEY_ID=...,AWS_SECRET_ACCESS_KEY=...
+
+## Ops tools (private) -------------------------------------------------------
+OPS_ENABLE=false
+OPS_DOZZLE=true
+OPS_UPTIME_KUMA=true
+OPS_DOZZLE_PORT=9999
+OPS_UPTIME_KUMA_PORT=3001

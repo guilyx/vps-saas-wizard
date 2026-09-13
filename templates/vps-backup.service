@@ -1,0 +1,10 @@
+[Unit]
+Description=vps-wizard nightly backup
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vps-backup
+Nice=10
+IOSchedulingClass=idle

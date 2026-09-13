@@ -1,0 +1,41 @@
+# Managed by vps-wizard - shared Traefik middlewares (applied to every site)
+http:
+  middlewares:
+    security-headers:
+      headers:
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: true
+        contentTypeNosniff: true
+        frameDeny: false
+        customFrameOptionsValue: SAMEORIGIN
+        referrerPolicy: strict-origin-when-cross-origin
+        permissionsPolicy: "camera=(), microphone=(), geolocation=()"
+        customResponseHeaders:
+          Server: ""
+          X-Powered-By: ""
+
+    # Application-layer rate limit: average req/s per client IP with burst.
+    rate-limit:
+      rateLimit:
+        average: {{TRAEFIK_RATE_AVG}}
+        burst: {{TRAEFIK_RATE_BURST}}
+        period: 1s
+        sourceCriterion:
+          ipStrategy:
+            depth: {{TRAEFIK_IP_DEPTH}}
+
+    # Cap concurrent in-flight requests per client IP.
+    inflight:
+      inFlightReq:
+        amount: {{TRAEFIK_INFLIGHT}}
+        sourceCriterion:
+          ipStrategy:
+            depth: {{TRAEFIK_IP_DEPTH}}
+
+    compress:
+      compress: {}
+
+    body-limit:
+      buffering:
+        maxRequestBodyBytes: {{TRAEFIK_MAX_BODY}}

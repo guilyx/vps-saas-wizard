@@ -1,0 +1,10 @@
+[Unit]
+Description=Run vps-wizard backup daily at {{BACKUP_TIME}}
+
+[Timer]
+OnCalendar=*-*-* {{BACKUP_TIME}}:00
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,30 @@
+# Managed by vps-wizard
+[DEFAULT]
+bantime  = {{FAIL2BAN_BANTIME}}
+findtime = {{FAIL2BAN_FINDTIME}}
+maxretry = {{FAIL2BAN_MAXRETRY}}
+# Escalate repeat offenders
+bantime.increment = true
+bantime.factor    = 2
+bantime.maxtime   = 1w
+backend  = systemd
+banaction = ufw
+banaction_allports = ufw
+ignoreip = 127.0.0.1/8 ::1 100.64.0.0/10 {{FAIL2BAN_IGNOREIP}}
+
+[sshd]
+enabled  = true
+mode     = aggressive
+port     = {{SSH_PORT}}
+backend  = systemd
+
+[recidive]
+enabled  = true
+backend  = auto
+logpath  = /var/log/fail2ban.log
+banaction = ufw
+bantime  = 1w
+findtime = 1d
+maxretry = 3
+
+{{FAIL2BAN_HTTP_SECTION}}

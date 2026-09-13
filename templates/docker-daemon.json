@@ -1,0 +1,18 @@
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "{{DOCKER_LOG_MAX_SIZE}}",
+    "max-file": "{{DOCKER_LOG_MAX_FILE}}",
+    "compress": "true"
+  },
+  "live-restore": true,
+  "userland-proxy": false,
+  "no-new-privileges": true,
+  "default-ulimits": {
+    "nofile": { "Name": "nofile", "Hard": 65536, "Soft": 65536 }
+  },
+  "default-address-pools": [
+    { "base": "172.17.0.0/16", "size": 24 },
+    { "base": "172.18.0.0/16", "size": 24 }
+  ]
+}

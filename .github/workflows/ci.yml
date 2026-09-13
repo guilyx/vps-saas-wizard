@@ -1,0 +1,70 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update -q && sudo apt-get install -y -q shellcheck
+      - name: shellcheck
+        run: shellcheck -x -S warning bin/vps-wizard install.sh lib/*.sh steps/*.sh templates/backup.sh templates/app-deploy.sh tests/run.sh
+      - name: Unit + dry-run tests
+        run: bash tests/run.sh
+      - name: Validate generated Caddyfile
+        run: |
+          S=$(mktemp -d)
+          WIZARD_ETC=$S/etc WIZARD_APPS_DIR=$S/apps WIZARD_PROXY_DIR=$S/proxy \
+            bash tests/render-proxy-configs.sh "$S"
+          docker run --rm -v "$S/proxy/Caddyfile:/etc/caddy/Caddyfile:ro" -v "$S/proxy/sites:/etc/caddy/sites:ro" \
+            caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+      - name: Validate generated Traefik config
+        run: |
+          S=$(mktemp -d)
+          PROXY_TYPE=traefik WIZARD_ETC=$S/etc WIZARD_APPS_DIR=$S/apps WIZARD_PROXY_DIR=$S/proxy \
+            bash tests/render-proxy-configs.sh "$S"
+          python3 -c "import yaml,glob; [yaml.safe_load(open(f)) for f in ['$S/proxy/traefik.yml']+glob.glob('$S/proxy/dynamic/*.yml')]; print('yaml ok')"
+          # Actually boot Traefik against the generated config: it must parse the
+          # static file, load every dynamic router/middleware and reach the ACME
+          # stage. Missing middlewares or bad YAML surface as errors here.
+          mkdir -p "$S/logs"
+          # api.insecure in the config file wins over the CLI flag, so patch a copy.
+          sed -e 's/^  dashboard: false/  dashboard: true/' \
+              -e 's/^  insecure: false/  insecure: true/' \
+              "$S/proxy/traefik.yml" > "$S/traefik-check.yml"
+          docker run --rm --name traefik-check -d -p 127.0.0.1:8082:8082 \
+            -v "$S/traefik-check.yml:/etc/traefik/traefik.yml:ro" \
+            -v "$S/proxy/dynamic:/etc/traefik/dynamic:ro" \
+            -v "$S/logs:/var/log/traefik" \
+            traefik:v3.1 \
+            --configFile=/etc/traefik/traefik.yml \
+            --entryPoints.traefik.address=:8082
+          sleep 8
+          curl -fsS http://127.0.0.1:8082/api/http/routers > "$S/routers.json"
+          curl -fsS http://127.0.0.1:8082/api/http/middlewares > "$S/middlewares.json"
+          docker logs traefik-check > "$S/traefik.log" 2>&1 || true
+          docker rm -f traefik-check >/dev/null 2>&1 || true
+          cat "$S/traefik.log"
+          python3 - "$S/routers.json" "$S/middlewares.json" <<'PY'
+          import json, sys
+          objs = [o for f in sys.argv[1:3] for o in json.load(open(f))
+                  if o.get("provider") != "internal"]
+          for o in objs:
+              print(o.get("name"), o.get("status"), o.get("error", ""))
+          bad = [o.get("name") for o in objs if o.get("status") != "enabled"]
+          assert any(o["name"] == "demo@file" for o in objs), "router demo@file missing"
+          assert not bad, f"objects not enabled: {bad}"
+          print("traefik dynamic config ok")
+          PY
+      - name: Validate compose files
+        run: |
+          S=$(mktemp -d)
+          WIZARD_ETC=$S/etc WIZARD_APPS_DIR=$S/apps WIZARD_PROXY_DIR=$S/proxy \
+            bash tests/render-proxy-configs.sh "$S"
+          docker compose -f "$S/proxy/compose.yml" config -q
+          docker compose -f "$S/apps/demo/src/compose.yml" -f "$S/apps/demo/compose.wizard.yml" --env-file "$S/apps/demo/.env" config -q

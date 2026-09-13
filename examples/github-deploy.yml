@@ -1,0 +1,44 @@
+# Example GitHub Actions workflow: zero-touch deploy on push to main.
+# Put this in your APP repository as .github/workflows/deploy.yml
+#
+# Secrets to add in the app repo:
+#   VPS_HOST      public IP or Tailscale IP of the server
+#   VPS_PORT      SSH port (22 unless you changed SSH_PORT)
+#   VPS_USER      the deploy user (default: deploy)
+#   VPS_SSH_KEY   private key whose public half is in the deploy user's authorized_keys
+#   APP_NAME      the vps-wizard app name (e.g. myapp)
+#
+# If public SSH is closed (TAILSCALE_RESTRICT_SSH=true), uncomment the
+# tailscale step and add TS_OAUTH_CLIENT_ID / TS_OAUTH_SECRET secrets.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # - uses: tailscale/github-action@v3
+      #   with:
+      #     oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+      #     oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+      #     tags: tag:ci
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          port: ${{ secrets.VPS_PORT }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 20m
+          script: |
+            set -e
+            sudo vps-wizard app deploy ${{ secrets.APP_NAME }}
+            sudo vps-wizard doctor || true

@@ -1,0 +1,3 @@
+# Variables are shared across sourced files; sourcing paths are dynamic.
+disable=SC2034,SC1090,SC1091
+external-sources=true

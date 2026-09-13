@@ -1,0 +1,59 @@
+# Managed by vps-wizard - global Caddy config. Per-app sites: ./sites/*.caddy
+{
+	email {{PROXY_EMAIL}}
+	admin localhost:2019
+	servers {
+		timeouts {
+			read_body 30s
+			read_header 10s
+			idle 2m
+		}
+		max_header_size 16KB
+{{CADDY_TRUSTED_PROXIES}}
+	}
+}
+
+# Reusable snippets ----------------------------------------------------------
+(security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+		-X-Powered-By
+	}
+}
+
+(compress) {
+	encode zstd gzip
+}
+
+(block_probes) {
+	@probes path /.env* /.git* /wp-admin* /wp-login.php /xmlrpc.php /phpmyadmin* /.aws* /config.json /vendor/phpunit*
+	respond @probes 403
+}
+
+(app_defaults) {
+	import security_headers
+	import compress
+	import block_probes
+	request_body {
+		max_size {{CADDY_MAX_BODY}}
+	}
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 50mb
+			roll_keep 5
+		}
+		format json
+	}
+}
+
+# Real sites are declared one per file in sites/*.caddy. Hosts that are not
+# declared get no certificate and a 404: on-demand TLS is deliberately off, so
+# nobody can make this server issue certificates for domains you don't own.
+# (No catch-all `:80` block here - one would disable Caddy's automatic
+# HTTP->HTTPS redirects for the real sites.)
+import sites/*.caddy

@@ -1,0 +1,12 @@
+# Managed by vps-wizard - private ops stack.
+# Bound to {{OPS_BIND_IP}} only (Tailscale / loopback): never exposed publicly.
+services:
+{{OPS_DOZZLE_SERVICE}}
+{{OPS_UPTIME_KUMA_SERVICE}}
+
+volumes:
+  uptime_kuma_data:
+
+networks:
+  proxy:
+    external: true
