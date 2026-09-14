@@ -88,6 +88,40 @@ ssh_current_port() {
 # service_active NAME
 service_active() { systemctl is-active --quiet "$1" 2>/dev/null; }
 
+# docker_running : ask the daemon itself rather than the init system, so the
+# answer is right on hosts where docker is not managed by systemd.
+docker_running() { have docker && docker info >/dev/null 2>&1; }
+
+# port_listening PORT : 0 = something listens, 1 = nothing listens,
+# 2 = could not determine (no probe tool available). Never report "nothing
+# listening" just because the probing tool is missing.
+port_listening() {
+  local p="$1" hex
+  if have ss; then
+    ss -ltn 2>/dev/null | awk 'NR>1 {print $4}' | grep -qE "[:.]${p}$"
+    return $?
+  fi
+  if have lsof; then
+    lsof -nP -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1
+    return $?
+  fi
+  if have netstat; then
+    netstat -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}$"
+    return $?
+  fi
+  # Last resort: the kernel tables. Only pass files that exist - IPv6 is absent
+  # on some hosts and awk would fail on the missing path.
+  local -a proc_files=()
+  [[ -r /proc/net/tcp ]] && proc_files+=(/proc/net/tcp)
+  [[ -r /proc/net/tcp6 ]] && proc_files+=(/proc/net/tcp6)
+  if (( ${#proc_files[@]} > 0 )) && have awk; then
+    printf -v hex ':%04X' "$p"
+    awk -v h="$hex" '$4=="0A" && index($2,h)>0 {found=1} END {exit !found}' "${proc_files[@]}" 2>/dev/null
+    return $?
+  fi
+  return 2
+}
+
 detect_summary_lines() {
   local lines=()
   lines+=("$(printf '%sOS%s        %s (%s)' "$C_GRAY" "$C_RESET" "$OS_PRETTY" "$ARCH")")

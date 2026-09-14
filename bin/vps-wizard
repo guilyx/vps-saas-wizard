@@ -309,8 +309,7 @@ cmd_apply() {
   load_config_or_defaults || die "No config. Run 'vps-wizard init' or pass --config FILE."
   HOST_PUBLIC_IP=$(public_ip)
   ui_banner "$WIZARD_VERSION"
-  ui_box "Host" "$(detect_summary_lines)"
-  step_preflight_prompt
+  step_preflight_prompt   # prints the host box and the preflight checks
   validate_config || die "Configuration is invalid."
   show_plan
   ui_confirm_or_exit "Apply?"
@@ -374,7 +373,7 @@ cmd_doctor() {
   if service_active fail2ban; then pass "fail2ban running ($(fail2ban-client status 2>/dev/null | awk -F: '/Jail list/{print $2}' | xargs))"; else warn "fail2ban not running"; fi
   [[ "$(sysctl -n net.ipv4.tcp_syncookies 2>/dev/null)" == 1 ]] && pass "SYN cookies on" || warn "SYN cookies off"
   if have docker; then
-    service_active docker && pass "docker running" || fail "docker not running"
+    docker_running && pass "docker running" || fail "docker not running"
     docker network inspect proxy >/dev/null 2>&1 && pass "proxy network exists" || warn "proxy network missing"
     local exposed
     exposed=$(docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null | grep -E '0\.0\.0\.0:|:::' | grep -vE '^proxy-' || true)
@@ -390,7 +389,12 @@ cmd_doctor() {
   if [[ "$t" != none ]]; then
     docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^proxy-$t$" && pass "$t proxy running" || fail "$t proxy container not running"
     for p in 80 443; do
-      if ss -ltn 2>/dev/null | grep -qE ":$p\b"; then pass "port $p listening"; else fail "nothing listens on $p"; fi
+      port_listening "$p"; local lrc=$?
+      case "$lrc" in
+        0) pass "port $p listening" ;;
+        1) fail "nothing listens on $p" ;;
+        *) warn "cannot check port $p (no ss/lsof/netstat and /proc/net/tcp unreadable)" ;;
+      esac
     done
   fi
   local d

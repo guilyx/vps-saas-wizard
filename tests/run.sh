@@ -49,6 +49,13 @@ assert_true valid_git_or_path_or_empty "git@github.com:me/app.git"
 assert_true valid_git_or_path_or_empty ""
 assert_false valid_git_or_path_or_empty "/definitely/not/here"
 
+echo "== ui_fill (must stay multibyte-safe: tr would emit only the first byte)"
+assert_eq "$(ui_fill '-' 5)" "-----" "ascii glyph repeats"
+assert_eq "$(ui_fill '─' 3)" "───" "box-drawing glyph repeats intact"
+assert_eq "$(ui_fill '─' 3 | wc -c | tr -d ' ')" 9 "3 glyphs are 9 bytes, not 3"
+assert_eq "$(ui_fill '─' 0)" "" "zero count prints nothing"
+assert_eq "$(ui_fill '█' 2)" "██" "block glyph repeats intact"
+
 echo "== config load/save"
 cat >"$SANDBOX/c.conf" <<'EOF'
 # comment
@@ -144,6 +151,24 @@ first=$(env_lookup "$envf" SESSION_SECRET)
 app_build_env "$SANDBOX/apps/demo" "$SANDBOX/apps/demo/src" >/dev/null
 assert_eq "$(env_lookup "$envf" SESSION_SECRET)" "$first" "secret preserved on re-run"
 DRY_RUN=true
+
+echo "== port_listening (must not report a missing probe tool as a closed port)"
+python3 -m http.server 18731 --bind 127.0.0.1 >/dev/null 2>&1 &
+probe_pid=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  port_listening 18731 && break
+  sleep 0.3
+done
+port_listening 18731; assert_eq $? 0 "detects an open port"
+port_listening 18732; assert_eq $? 1 "reports a closed port"
+# With ss/lsof/netstat absent it must fall back to /proc, not claim "closed".
+mkdir -p "$SANDBOX/minbin"
+for t in awk grep; do ln -sf "$(command -v "$t")" "$SANDBOX/minbin/$t"; done
+# shellcheck disable=SC2123  # deliberately narrowing PATH to hide the probe tools
+( PATH="$SANDBOX/minbin"; port_listening 18731 ); assert_eq $? 0 "falls back to /proc when ss/lsof/netstat are absent"
+# shellcheck disable=SC2123
+( PATH="$SANDBOX/minbin"; port_listening 18732 ); assert_eq $? 1 "/proc fallback still reports closed ports"
+kill "$probe_pid" 2>/dev/null; wait "$probe_pid" 2>/dev/null
 
 echo "== compose parsing"
 cat >"$SANDBOX/compose.yml" <<'EOF'
