@@ -12,6 +12,17 @@ case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in *UTF-8*|*utf8*|*UTF8*|*utf-8*) UI_UT
 
 ui_cols() { local c; c=$(tput cols 2>/dev/null || echo 80); (( c > 100 )) && c=100; echo "$c"; }
 
+# ui_fill GLYPH COUNT : print GLYPH COUNT times.
+# Note: `tr ' ' "$glyph"` cannot be used here - tr is byte-oriented and would
+# emit only the first byte of a multibyte box-drawing character, producing
+# invalid UTF-8. Bash pattern substitution is character-safe.
+ui_fill() {
+  local glyph="$1" n="$2" pad
+  (( n > 0 )) || return 0
+  printf -v pad "%${n}s" ''
+  printf '%s' "${pad// /$glyph}"
+}
+
 if [[ "$UI_COLOR" == true ]]; then
   C_RESET=$'\033[0m'   C_BOLD=$'\033[1m'    C_DIM=$'\033[2m'    C_ITAL=$'\033[3m'
   C_RED=$'\033[38;5;203m' C_GREEN=$'\033[38;5;114m' C_YELLOW=$'\033[38;5;221m'
@@ -52,7 +63,7 @@ ui_blank() { printf '\n'; }
 
 ui_hr() {
   local cols; cols=$(ui_cols)
-  printf '%s' "$C_GRAY"; printf "%${cols}s" '' | tr ' ' "$G_HL"; printf '%s\n' "$C_RESET"
+  printf '%s' "$C_GRAY"; ui_fill "$G_HL" "$cols"; printf '%s\n' "$C_RESET"
 }
 
 # ui_kv "Key" "Value"
@@ -73,9 +84,9 @@ ui_box() {
   printf '  %s%s%s' "$C_ACCENT" "$G_TL" "$G_HL"
   if [[ -n "$title" ]]; then
     printf ' %s%s%s%s ' "$C_BOLD" "$title" "$C_RESET" "$C_ACCENT"
-    printf "%$((inner - ${#title} - 3))s" '' | tr ' ' "$G_HL"
+    ui_fill "$G_HL" "$((inner - ${#title} - 3))"
   else
-    printf "%$((inner - 1))s" '' | tr ' ' "$G_HL"
+    ui_fill "$G_HL" "$((inner - 1))"
   fi
   printf '%s%s\n' "$G_TR" "$C_RESET"
   for line in "$@"; do
@@ -86,7 +97,7 @@ ui_box() {
     printf '%s%s%s\n' "$C_ACCENT" "$G_VL" "$C_RESET"
   done
   printf '  %s%s' "$C_ACCENT" "$G_BL"
-  printf "%${inner}s" '' | tr ' ' "$G_HL"
+  ui_fill "$G_HL" "$inner"
   printf '%s%s\n' "$G_BR" "$C_RESET"
 }
 
